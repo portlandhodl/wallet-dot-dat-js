@@ -1,0 +1,40 @@
+{
+  "name": "wallet-dot-dat-js",
+  "version": "0.1.0",
+  "description": "Bitcoin Core wallet.dat (SQLite descriptor wallet) exporter — builds byte-exact descriptor wallet databases in pure JS with zero dependencies",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./sqlite-writer": "./src/sqlite-writer.js",
+    "./wallet-export": "./src/wallet-export.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "bitcoin",
+    "wallet.dat",
+    "bitcoin-core",
+    "descriptor-wallet",
+    "sqlite",
+    "watch-only",
+    "export",
+    "exporter"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/portlandhodl/wallet-dot-dat-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/portlandhodl/wallet-dot-dat-js/issues"
+  },
+  "homepage": "https://github.com/portlandhodl/wallet-dot-dat-js#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}
