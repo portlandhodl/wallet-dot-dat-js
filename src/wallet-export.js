@@ -25,7 +25,8 @@ const hodlWalletExport = (() => {
 
   const RECORD_VERSION = 280300; // last client version seen by the reference files
   const RECORD_MINVERSION = 169900; // FEATURE_PRE_SPLIT_KEYPOOL; every Core with descriptor support accepts it
-  const RANGE_END = 1000; // importdescriptors default active range
+  const RANGE_END = 1000; // Core's default lookahead, retained beyond the displayed window
+  const MAX_ADDRESS_INDEX = 0x7fffffff;
 
   // Wallet flags (walletutil.h): DESCRIPTORS | BLANK, plus DISABLE_PRIVATE_KEYS for watch-only.
   const FLAG_DISABLE_PRIVATE_KEYS = 1n << 32n;
@@ -34,6 +35,11 @@ const hodlWalletExport = (() => {
 
   const DUMMY_LOCATOR_VERSION = 70016; // CBlockLocator::DUMMY_VERSION, little-endian in records
 
+  // Bitcoin Core keeps the chain identity in two places: the SQLite
+  // application_id (the network magic, read big-endian) and the
+  // bestblock_nomerkle locator (the chain's genesis hash). The signet row is
+  // the default signet; Core derives a different network magic for custom
+  // signet challenges, which this export does not support.
   const NETWORKS = {
     mainnet: {
       applicationId: 0xf9beb4d9, // network magic in natural byte order
@@ -42,6 +48,10 @@ const hodlWalletExport = (() => {
     testnet: {
       applicationId: 0x0b110907,
       genesis: "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943",
+    },
+    signet: {
+      applicationId: 0x0a03cf40,
+      genesis: "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
     },
     regtest: {
       applicationId: 0xfabfb5da,
@@ -114,16 +124,28 @@ const hodlWalletExport = (() => {
 
   const reverseHex = (hexText) => hex(hexText).reverse();
 
-  // Descriptor bodies end in "/*)" for every descriptor this module consumes,
-  // so a digit+h before a path separator or bracket is always a hardened step.
-  const toCompatForm = (body) => body.replace(/(\d)h(?=[/\]])/g, "$1'");
+  // Core's compat form renders every hardened step with ' and re-encodes key
+  // material untouched. Every descriptor this exporter emits carries its
+  // hardened steps only inside the [fingerprint/path] key origin (a hardened
+  // branch step moves into the origin; an address-hardened account has no
+  // public descriptor at all), so rewriting the origin is exactly right. A
+  // body-wide substitution is not: base58 contains both digits and "h", and
+  // the account xpub sits directly before a "/", so it corrupts any xpub
+  // ending in <digit>h (about 1 in 375 account keys) and produces a
+  // DescriptorID that disagrees with the one Core recomputes at load
+  // (DBErrors::CORRUPT). The fingerprint is hex, so every "h" inside the
+  // origin marks a hardened step.
+  const toCompatForm = (body) =>
+    body.replace(/\[[0-9a-fA-F]{8}(?:\/\d+h?)*\]/g, (origin) => origin.replace(/h/g, "'"));
 
   const stripChecksum = (descriptor) => {
     const hash = descriptor.lastIndexOf("#");
     return hash >= 0 ? descriptor.slice(0, hash) : descriptor;
   };
 
-  const EXTENDED_KEY_PATTERN = /((?:xpub|tpub|ypub|upub|zpub|vpub|npub|xprv|tprv|yprv|uprv|zprv|vprv|nprv)[1-9A-HJ-NP-Za-km-z]{90,})/;
+  // SLIP-132 single-signature prefixes (plus generic xpub/xprv); Bitcoin has
+  // no base58 "npub"/"nprv" extended keys (that spelling is Nostr's bech32).
+  const EXTENDED_KEY_PATTERN = /((?:xpub|tpub|ypub|upub|zpub|vpub|xprv|tprv|yprv|uprv|zprv|vprv)[1-9A-HJ-NP-Za-km-z]{90,})/;
   const extractExtendedKey = (descriptor, label) => {
     const match = descriptor.match(EXTENDED_KEY_PATTERN);
     if (!match) throw new Error(`wallet.dat export: no extended key found in ${label} descriptor`);
@@ -142,11 +164,28 @@ const hodlWalletExport = (() => {
       for (const branch of [0, 1]) {
         const descriptor = branch === 0 ? account.receiveDescriptor : account.changeDescriptor;
         const privateDescriptor = branch === 0 ? account.receiveDescriptorPriv : account.changeDescriptorPriv;
+        // The descriptor's active range mirrors Core's importdescriptors
+        // range/next_index semantics: it covers every shown address index
+        // (addressBranches wins over the legacy receive/change row arrays;
+        // invalid indexes are ignored) plus Core's default keypool lookahead,
+        // clamped to the BIP32 index space.
+        const branchRows = account.addressBranches?.find((entry) => entry.branch === branch)?.rows;
+        const rows = Array.isArray(branchRows) ? branchRows : branch === 0 ? account.receive : account.change;
+        const indexes = Array.isArray(rows)
+          ? rows.map((row) => row?.index).filter((index) => Number.isSafeInteger(index) && index >= 0 && index <= MAX_ADDRESS_INDEX)
+          : [];
+        const rangeStart = indexes.length ? Math.min(...indexes) : 0;
+        const displayedEnd = indexes.length ? Math.max(...indexes) : 0;
+        const rangeEnd = indexes.length ? Math.min(MAX_ADDRESS_INDEX, displayedEnd + RANGE_END) : RANGE_END;
+        const nextIndex = indexes.length ? Math.min(MAX_ADDRESS_INDEX, displayedEnd + 1) : 0;
         units.push({
           type,
           internal: branch === 1,
           descriptor,
           privateDescriptor: includePrivate ? privateDescriptor : null,
+          nextIndex,
+          rangeStart,
+          rangeEnd,
         });
       }
     }
@@ -189,7 +228,7 @@ const hodlWalletExport = (() => {
 
       push(
         concat(streamString("walletdescriptor"), id),
-        concat(streamString(stored), u64le(creationTime), u32le(0), u32le(0), u32le(RANGE_END)),
+        concat(streamString(stored), u64le(creationTime), u32le(unit.nextIndex), u32le(unit.rangeStart), u32le(unit.rangeEnd)),
       );
 
       const xpub = extractExtendedKey(stored, "watch-only");
@@ -214,6 +253,11 @@ const hodlWalletExport = (() => {
           concat(streamString("walletdescriptorkey"), id, compactSize(pubkey.length), pubkey),
           concat(compactSize(der.length), der, keyHash),
         );
+        // concat() copied the bytes into the record; wipe the intermediates.
+        raw.fill(0);
+        secret.fill(0);
+        der.fill(0);
+        keyHash.fill(0);
       }
 
       const activeKey = `${unit.internal}:${unit.type}`;

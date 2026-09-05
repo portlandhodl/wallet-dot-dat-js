@@ -13,7 +13,10 @@
     "src"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:wallet-export": "node --test test/wallet-export.test.mjs",
+    "test:wallet-export-fuzz": "node --test test/wallet-export-fuzz.test.mjs",
+    "test:sqlite-writer": "node --test test/sqlite-writer.test.mjs"
   },
   "keywords": [
     "bitcoin",

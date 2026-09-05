@@ -32,7 +32,7 @@ import { buildWalletDat, walletDatFilename } from "wallet-dot-dat-js";
 
 const wallet = {
   kind: "hd",
-  network: "mainnet", // "mainnet" | "testnet" | "regtest"
+  network: "mainnet", // "mainnet" | "testnet" | "signet" | "regtest"
   accounts: [
     {
       def: { id: "bip84" }, // "bip44" | "bip49" | "bip84" | "bip86"
@@ -41,6 +41,15 @@ const wallet = {
       // optional, needed only for signing exports:
       receiveDescriptorPriv: "wpkh([fingerprint/84'/0'/0']xprv.../0/*)#checksum",
       changeDescriptorPriv: "wpkh([fingerprint/84'/0'/0']xprv.../1/*)#checksum",
+      // optional: shown address indexes drive the descriptor's stored
+      // next_index / range_start / range_end (Core importdescriptors
+      // semantics; see below). Either shape works:
+      addressBranches: [
+        { branch: 0, rows: [{ index: 0 }, { index: 1 }] }, // receive
+        { branch: 1, rows: [{ index: 0 }] }, // change
+      ],
+      // ... or the legacy fallback arrays:
+      // receive: [{ index: 0 }], change: [{ index: 0 }],
     },
   ],
 };
@@ -91,7 +100,8 @@ UI label announcing which variant is being downloaded.
 ### `walletDescriptorUnits(wallet, includePrivate) → Array`
 
 The flattened per-branch descriptor export units (receive + change for each
-account/script type).
+account/script type), including each unit's `nextIndex`, `rangeStart`, and
+`rangeEnd`.
 
 ### `wallet-dot-dat-js/sqlite-writer`
 
@@ -117,7 +127,12 @@ Record layout written to the `main` table (Bitcoin Core 28.x):
   `DESCRIPTORS | BLANK`, plus `DISABLE_PRIVATE_KEYS` for watch-only exports.
 - `bestblock` / `bestblock_nomerkle` — fresh wallets sit on the genesis block.
 - `walletdescriptor <id>` — public descriptor string, creation time,
-  `next_index`, `range_start`, `range_end`.
+  `next_index`, `range_start`, `range_end`. The range mirrors Core's
+  `importdescriptors` semantics: it covers every shown address index
+  (`addressBranches` rows win over the legacy `receive`/`change` arrays;
+  invalid indexes are ignored) plus Core's 1000-key lookahead, clamped to the
+  BIP32 index space. With no rows the descriptor gets Core's default
+  `[0, 1000)` window with `next_index` 0.
 - `walletdescriptorcache <id> <pos 0>` — 74-byte branch xpub.
 - `walletdescriptorkey <id> <pubkey>` — DER private key + key hash
   (signing exports only).
@@ -133,14 +148,33 @@ Record layout written to the `main` table (Bitcoin Core 28.x):
 ## Tests
 
 ```sh
-npm test
+npm test                      # everything
+npm run test:wallet-export    # unit + ground-truth + bitcoind integration
+npm run test:wallet-export-fuzz  # seeded fuzzing against independent verification
+npm run test:sqlite-writer    # the SQLite container writer
 ```
 
-The suites rebuild ground-truth `main`-table rows captured from Bitcoin Core
-v28.3.0 (`createwallet` + `importdescriptors` on regtest) using an independent
-reference implementation of the crypto, and verify the generated database
-files with Python's `sqlite3` (the real SQLite C library): `PRAGMA
-integrity_check`, schema readback, and full row dumps.
+Three layers:
+
+1. **Ground truth** — `test/wallet-export.test.mjs` rebuilds the exact
+   `main`-table rows captured from Bitcoin Core v28.3.0 (`createwallet` +
+   `importdescriptors` on regtest) using an independent reference
+   implementation of the crypto (`test/wallet-export-harness.mjs`: BigInt
+   secp256k1/BIP32 + `node:crypto`), and verifies the generated database
+   files with Python's `sqlite3` (the real SQLite C library): `PRAGMA
+   integrity_check`, schema readback, and full row dumps.
+2. **Fuzzing** — `test/wallet-export-fuzz.test.mjs` generates a deterministic
+   corpus across networks, script types, origin shapes, SLIP-132 prefixes,
+   xpub tails (including the `<digit>h` DescriptorID corruption class),
+   checksum presence, birthdays, and private/watch-only mixes. Every wallet's
+   records are decoded byte-by-byte and checked against independent reference
+   code — including the exact DescriptorID check Bitcoin Core runs at load —
+   and a slice round-trips through the real SQLite C library.
+3. **Live Bitcoin Core** — where `bitcoind` is installed, the generated
+   wallet.dat is loaded (`loadwallet`) on a fresh node of each chain
+   (mainnet, testnet, signet, regtest), the signing variant hands out the
+   chain's own address form, and a wrong-chain file is refused. Verified with
+   Bitcoin Core v31.1.0.
 
 ## License
 
